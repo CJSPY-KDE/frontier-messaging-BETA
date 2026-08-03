@@ -8,7 +8,9 @@ A terminal-based ephemeral chat app written in C.
 
 DEPENDENCIES: 
 pacman : sudo pacman -S base-devel sqlite openssl
+
 apt    : sudo apt install build-essential libsqlite3-dev libssl-dev
+
 xcode-select --install
 
 How to get it:
