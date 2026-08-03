@@ -20,6 +20,7 @@
 #define MAX_BIO 256
 #define MAX_MESSAGE 512
 #define CLEANUP_INTERVAL 300
+#define MAX_DISCOVER_BATCH 50 // Fetch more to shuffle locally
 
 typedef struct {
     int user_id;
@@ -44,9 +45,11 @@ void list_friends();
 void send_direct_message(int recipient_id, const char* content);
 void view_direct_messages(int sender_id);
 void view_profile(int user_id);
+void manage_account(); // NEW
 void main_menu();
 void trim_whitespace(char* str);
 void* cleanup_loop(void* arg);
+void clear_input_buffer(); // NEW
 
 // --- CURL HELPER ---
 struct MemoryStruct {
@@ -125,6 +128,11 @@ char* send_request(const char* method, const char* endpoint, const char* data) {
 
 // --- FUNCTION DEFINITIONS ---
 
+void clear_input_buffer() {
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF);
+}
+
 char* hash_password(const char* password) {
     unsigned char hash[SHA256_DIGEST_LENGTH];
     static char hex_hash[SHA256_DIGEST_LENGTH * 2 + 1];
@@ -137,6 +145,7 @@ char* hash_password(const char* password) {
 }
 
 void trim_whitespace(char* str) {
+    if (!str) return;
     int len = strlen(str);
     if (len > 0 && str[len - 1] == '\n') str[len - 1] = '\0';
     while (isspace((unsigned char)*str)) str++;
@@ -217,16 +226,23 @@ void view_direct_messages(int sender_id) {
     if (current_user_id == -1) { printf("✗ Not logged in!\n"); return; }
 
     char query[1024];
-    snprintf(query, sizeof(query), "/messages?select=id,content,timestamp&sender_id=eq.%d&recipient_id=eq.%d&order=timestamp.asc",
+    snprintf(query, sizeof(query), "/messages?select=id,content,timestamp&sender_id=eq.%d&recipient_id=eq.%d&order=timestamp.desc",
              sender_id, current_user_id);
 
     char* response = send_request("GET", query, NULL);
 
     printf("\n--- Messages from User %d ---\n", sender_id);
 
+    if (!response || !strstr(response, "sender_id")) {
+        printf("No messages found.\n");
+        if(response) free(response);
+        return;
+    }
+
     char* ptr = response;
     int count = 0;
 
+    // Parse JSON array manually (fragile but works for simple cases)
     while ((ptr = strstr(ptr, "{\"id\":")) != NULL) {
         char* id_ptr = strstr(ptr, "\"id\":");
         if (id_ptr) {
@@ -258,10 +274,7 @@ void view_direct_messages(int sender_id) {
 
                 printf("[%s] %s\n", time, content);
                 count++;
-
-                char delete_cmd[256];
-                snprintf(delete_cmd, sizeof(delete_cmd), "/messages?id=eq.%d", id);
-                send_request("DELETE", delete_cmd, NULL);
+                // REMOVED: Automatic deletion here. Messages stay until manually deleted.
             }
         }
         ptr++;
@@ -273,7 +286,6 @@ void view_direct_messages(int sender_id) {
 
     if(response) free(response);
 }
-
 void view_profile(int user_id) {
     if (current_user_id == -1) { printf("✗ Not logged in!\n"); return; }
 
@@ -284,8 +296,9 @@ void view_profile(int user_id) {
 
     if (response && strstr(response, "username")) {
         char* start = response;
-        char username[50], bio[256], interests[256], created[50], last_active[50];
+        char username[50], bio[256], interests[256];
         int discoverable = 0;
+        int display_id = user_id; // Show the requested user's ID
 
         char* u = strstr(start, "\"username\":\"");
         if (u) {
@@ -319,6 +332,7 @@ void view_profile(int user_id) {
         printf("\n╔════════════════════════════════════════════════════════════╗\n");
         printf("║                    PROFILE VIEW                            ║\n");
         printf("╠════════════════════════════════════════════════════════════╣\n");
+        printf("║ User ID: %-43d ║\n", display_id); // NEW LINE FOR ID
         printf("║ Username: %-40s ║\n", username);
         printf("║ Discoverable: %s                                      ║\n", discoverable ? "Yes" : "No");
         printf("╠════════════════════════════════════════════════════════════╣\n");
@@ -330,6 +344,85 @@ void view_profile(int user_id) {
         printf("✗ User not found.\n");
     }
     if(response) free(response);
+}
+// NEW: Manage Account Function
+void manage_account() {
+    if (current_user_id == -1) { printf("✗ Not logged in!\n"); return; }
+
+    char choice[10];
+    char new_bio[MAX_BIO];
+    char new_interests[MAX_BIO];
+    char new_discoverable[10];
+
+    while (1) {
+        printf("\n╔════════════════════════════════════════════════════════════╗\n");
+        printf("║              MANAGE ACCOUNT                               ║\n");
+        printf("╚════════════════════════════════════════════════════════════╝\n");
+        printf("1. Update Bio\n");
+        printf("2. Update Interests\n");
+        printf("3. Toggle Discoverability\n");
+        printf("4. View Profile\n");
+        printf("5. Back to Main Menu\n");
+        printf("Choice: ");
+
+        fgets(choice, sizeof(choice), stdin);
+        trim_whitespace(choice);
+        if (strcmp(choice, "1") == 0) {
+            printf("Enter new bio: ");
+            fgets(new_bio, sizeof(new_bio), stdin);
+            trim_whitespace(new_bio);
+
+            char json[1024];
+            snprintf(json, sizeof(json), "{\"bio\":\"%s\"}", new_bio);
+            char* resp = send_request("PATCH", "/profiles?user_id=eq.{current_user_id}", json);
+            if (resp && strstr(resp, "bio")) {
+                printf("✓ Bio updated successfully.\n");
+            } else {
+                printf("✗ Failed to update bio.\n");
+            }
+            if (resp) free(resp);
+        }
+        else if (strcmp(choice, "2") == 0) {
+            printf("Enter new interests: ");
+            fgets(new_interests, sizeof(new_interests), stdin);
+            trim_whitespace(new_interests);
+
+            char json[1024];
+            snprintf(json, sizeof(json), "{\"interests\":\"%s\"}", new_interests);
+            char* resp = send_request("PATCH", "/profiles?user_id=eq.{current_user_id}", json);
+            if (resp && strstr(resp, "interests")) {
+                printf("✓ Interests updated successfully.\n");
+            } else {
+                printf("✗ Failed to update interests.\n");
+            }
+            if (resp) free(resp);
+        }
+        else if (strcmp(choice, "3") == 0) {
+            printf("Toggle discoverability? (1 for Yes/Visible, 0 for No/Hidden): ");
+            fgets(new_discoverable, sizeof(new_discoverable), stdin);
+            trim_whitespace(new_discoverable);
+
+            int is_visible = (atoi(new_discoverable) == 1) ? 1 : 0;
+            char json[1024];
+            snprintf(json, sizeof(json), "{\"discoverable\":%s}", is_visible ? "true" : "false");
+            char* resp = send_request("PATCH", "/profiles?user_id=eq.{current_user_id}", json);
+            if (resp && strstr(resp, "discoverable")) {
+                printf("✓ Discoverability updated to %s.\n", is_visible ? "Visible" : "Hidden");
+            } else {
+                printf("✗ Failed to update discoverability.\n");
+            }
+            if (resp) free(resp);
+        }
+        else if (strcmp(choice, "4") == 0) {
+            view_profile(current_user_id);
+        }
+        else if (strcmp(choice, "5") == 0) {
+            break;
+        }
+        else {
+            printf("Invalid choice.\n");
+        }
+    }
 }
 
 void main_menu() {
@@ -344,7 +437,8 @@ void main_menu() {
         printf("4. Send Direct Message\n");
         printf("5. View Messages from a User\n");
         printf("6. View My Own Profile\n");
-        printf("7. Logout\n");
+        printf("7. Manage Account\n"); // NEW OPTION
+        printf("8. Logout\n");
         printf("Choice: ");
 
         fgets(choice, sizeof(choice), stdin);
@@ -359,8 +453,9 @@ void main_menu() {
         } else if (strcmp(choice, "4") == 0) {
             int recipient_id;
             printf("Enter recipient user ID: ");
-            scanf("%d", &recipient_id);
-            getchar();
+            if (scanf("%d", &recipient_id) != 1) { clear_input_buffer(); continue; }
+            clear_input_buffer(); // Clear newline
+
             char content[MAX_MESSAGE];
             printf("Message: ");
             fgets(content, sizeof(content), stdin);
@@ -369,12 +464,14 @@ void main_menu() {
         } else if (strcmp(choice, "5") == 0) {
             int sender_id;
             printf("Enter sender user ID: ");
-            scanf("%d", &sender_id);
-            getchar();
+            if (scanf("%d", &sender_id) != 1) { clear_input_buffer(); continue; }
+            clear_input_buffer();
             view_direct_messages(sender_id);
         } else if (strcmp(choice, "6") == 0) {
             view_profile(current_user_id);
         } else if (strcmp(choice, "7") == 0) {
+            manage_account();
+        } else if (strcmp(choice, "8") == 0) {
             current_user_id = -1;
             current_username[0] = '\0';
             printf("Logged out successfully.\n");
@@ -385,12 +482,24 @@ void main_menu() {
     }
 }
 
+// Helper for client-side shuffle (Fisher-Yates)
+void shuffle_users(User* arr, int n) {
+    if (n <= 1) return;
+    srand(time(NULL));
+    for (int i = n - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        User temp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = temp;
+    }
+}
+
 void discover_people() {
     if (current_user_id == -1) { printf("✗ Not logged in!\n"); return; }
 
     char choice[10];
     printf("\n┌─── DISCOVER PEOPLE ───┐\n");
-    printf("1. Browse Random Users\n");
+    printf("1. Browse Random Users (New)\n");
     printf("2. Search by Username\n");
     printf("3. View My Own Profile\n");
     printf("Choice: ");
@@ -408,9 +517,12 @@ void discover_people() {
         printf("Enter username (partial match OK): ");
         fgets(search_query, sizeof(search_query), stdin);
         trim_whitespace(search_query);
-        snprintf(query, sizeof(query), "/profiles?select=user_id,username,bio,interests&discoverable=eq.true&user_id=neq.%d&username=ilike.%%s%%&order=random()", current_user_id, search_query);
+        // Note: Supabase 'ilike' is case-insensitive, but we need to escape % properly if needed
+        // For simplicity, we assume no special chars in username for this demo
+        snprintf(query, sizeof(query), "/profiles?select=user_id,username,bio,interests&discoverable=eq.true&user_id=neq.%d&username=ilike.*%s*&order=user_id.asc&limit=%d", current_user_id, search_query, MAX_DISCOVER_BATCH);
     } else {
-        snprintf(query, sizeof(query), "/profiles?select=user_id,username,bio,interests&discoverable=eq.true&user_id=neq.%d&order=random()&limit=10", current_user_id);
+        // Fetch a batch to shuffle locally
+        snprintf(query, sizeof(query), "/profiles?select=user_id,username,bio,interests&discoverable=eq.true&user_id=neq.%d&order=user_id.asc&limit=%d", current_user_id, MAX_DISCOVER_BATCH);
     }
 
     char* response = send_request("GET", query, NULL);
@@ -427,9 +539,9 @@ void discover_people() {
 
     char* ptr = response;
     int count = 0;
-    User users[10];
+    User users[MAX_DISCOVER_BATCH];
 
-    while ((ptr = strstr(ptr, "{\"user_id\":")) != NULL && count < 10) {
+    while ((ptr = strstr(ptr, "{\"user_id\":")) != NULL && count < MAX_DISCOVER_BATCH) {
         char* u_id = strstr(ptr, "\"user_id\":");
         if (u_id) {
             u_id += 10;
@@ -474,6 +586,11 @@ void discover_people() {
         printf("No users found.\n");
         if(response) free(response);
         return;
+    }
+
+    // Shuffle locally if browsing random
+    if (strcmp(choice, "1") == 0) {
+        shuffle_users(users, count);
     }
 
     for (int i = 0; i < count; i++) {
@@ -582,14 +699,16 @@ void list_friends() {
     printf("(Note: A 'friends' table needs to be created for this feature. For now, showing recent contacts.)\n");
     printf("No friends listed yet.\n");
 }
+
 void* cleanup_loop(void* arg) {
     while (1) {
         sleep(CLEANUP_INTERVAL);
         // Supabase handles TTL with database rules or scheduled functions.
         // We skip server-side cleanup logic in C for this simple client.
     }
-    // No return value needed for void function
+    return NULL;
 }
+
 int main() {
     pthread_t tid;
     pthread_create(&tid, NULL, cleanup_loop, NULL);
