@@ -14,6 +14,7 @@ apt    : sudo apt install build-essential libsqlite3-dev libssl-dev
 xcode-select --install
 
 How to get it:
+sudo git clone https://github.com/CJSPY-KDE/frontier-messaging-BETA.git
 cd frontier-messaging-BETA
 gcc frontiermessaging.c -o messenger -lsqlite3 -lssl -lcrypto -lpthread
 ./messenger
