@@ -18,7 +18,7 @@ How to get it:
 
 sudo git clone https://github.com/CJSPY-KDE/frontier-messaging-BETA.git
 cd frontier-messaging-BETA
-gcc frontiermessaging.c -o messenger -lsqlite3 -lssl -lcrypto -lpthread
+gcc frontiermessaging.c -o messenger -lsqlite3 -lssl -lcrypto -lpthread -lcurl
 ./messenger
 
 
@@ -27,9 +27,8 @@ IF YOUR ON WINDOWS YOU NEED:
 MinGW or Visual Studio Build Tools (for the compiler).
 SQLite3 and OpenSSL binaries (DLLs/libraries). 
 
+(if you want this on phone you can use termux)
 
 Enjoy this is in beta!
 
-
-To fully get rid of logs which are on your hard disk there is a delete db button there. DW! this deletes your WHOLE frontier-messaging info. but not real hard drive
-ENJOY
+ 
