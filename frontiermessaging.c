@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -13,28 +12,24 @@
 #include <stdarg.h>
 #include <signal.h>
 #include <sys/wait.h>
-#include <getopt.h>
 
 // ============================================================================
 // CONFIGURATION & CONSTANTS
 // ============================================================================
-#define MAX_USERNAME 32
-#define MAX_PASSWORD 64
-#define MAX_BIO 256
-#define MAX_INTERESTS 128
-#define MAX_MESSAGE 512
+#define MAX_USERNAME 64
+#define MAX_PASSWORD 128
+#define MAX_BIO 512
+#define MAX_INTERESTS 256
+#define MAX_MESSAGE 1024
 #define UNIQUE_SUFFIX_LEN 16
-#define MAX_MESSAGE_HEX_LEN 2048
+#define MAX_MESSAGE_HEX_LEN 4096
 #define SAFE_DIR_PERMS 0700
 #define SAFE_FILE_PERMS 0600
-#define MAX_FRIENDS 100
-#define MAX_PENDING 50
+#define MAX_FRIENDS 200
+#define MAX_PENDING 100
 #define MESSAGE_TTL_SECONDS 7200
-#define DEAD_MAN_DAYS 30
+#define INITIAL_CURL_BUFFER_SIZE 4096
 
-// Update this to your Render URL or Supabase REST URL
-// If using Supabase directly, use: "https://YOUR_PROJECT.supabase.co/rest/v1"
-// If using Render as a proxy, keep your current URL
 const char* BRIDGE_URL_DEFAULT = "https://frontier-bridge.onrender.com";
 const char* BRIDGE_URL = NULL;
 
@@ -74,6 +69,12 @@ typedef struct {
 PendingRequest pending_list[MAX_PENDING];
 
 const char* quotes[] = {
+    "Control is an illusion.",
+    "Im sorry",
+    "Silent hill",
+    "Account based in C137",
+    "Apples are good fruit",
+    "Big brother is watching",
     "The quieter you get, the more you hear.",
     "Are you a one or a zero?",
     "Privacy is a right.",
@@ -85,9 +86,8 @@ const char* quotes[] = {
 const int QUOTE_COUNT = sizeof(quotes) / sizeof(quotes[0]);
 
 // ============================================================================
-// FUNCTION PROTOTYPES (Updated)
+// FUNCTION PROTOTYPES
 // ============================================================================
-
 void clear_input_buffer();
 void trim_whitespace(char* str);
 void ensure_app_dir();
@@ -132,51 +132,16 @@ void check_message_seen(int friend_index);
 void run_update();
 void show_random_quote();
 
-// [NEW] Feature Prototypes
-void print_key_fingerprint(const unsigned char* public_key);
-void panic_wipe(void);
-void handle_panic(int sig);
-void check_dead_man_switch(void);
-void update_last_login(void);
-void handle_pipe_mode(int argc, char* argv[]);
-
 // ============================================================================
-// SIGNAL HANDLERS
+// SIGNAL HANDLER
 // ============================================================================
-
 void handle_sigint(int sig) {
     chat_running = 0;
-}
-
-// [NEW] Panic Wipe Handler
-void handle_panic(int sig) {
-    panic_wipe();
-}
-
-void panic_wipe() {
-    fprintf(stderr, "\n⚠️  PANIC TRIGGERED! Wiping local data...\n");
-    const char* home = getenv("HOME");
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "%s/.securechat/secret_key.enc", home);
-
-    // 1. Wipe memory
-    sodium_memzero(my_public_key, sizeof(my_public_key));
-    sodium_memzero(my_secret_key, sizeof(my_secret_key));
-    sodium_memzero(unique_user_id, sizeof(unique_user_id));
-    sodium_memzero(current_username, sizeof(current_username));
-    sodium_memzero(invisible_id, sizeof(invisible_id));
-
-    // 2. Delete local key file
-    remove(filepath);
-
-    // 3. Exit immediately
-    _exit(0);
 }
 
 // ============================================================================
 // INPUT HANDLING & UTILS
 // ============================================================================
-
 void clear_input_buffer() {
     int c;
     while ((c = getchar()) != '\n' && c != EOF);
@@ -199,7 +164,8 @@ void ensure_app_dir() {
     char dir[256];
     snprintf(dir, sizeof(dir), "%s/.securechat", home);
     if (mkdir(dir, SAFE_DIR_PERMS) != 0 && errno != EEXIST) {
-        fprintf(stderr, "[!] ERROR: Could not create app directory.\n"); exit(1); }
+        fprintf(stderr, "[!] ERROR: Could not create app directory.\n"); exit(1);
+    }
 }
 
 int load_env_vars() {
@@ -215,7 +181,6 @@ int load_env_vars() {
 // ============================================================================
 // CRYPTO & KEY MANAGEMENT
 // ============================================================================
-
 int generate_user_keys() {
     if (crypto_box_keypair(my_public_key, my_secret_key) != 0) {
         fprintf(stderr, "[!] CRITICAL: Failed to generate keypair.\n"); return 0;
@@ -318,116 +283,35 @@ void free_keys() {
 }
 
 // ============================================================================
-// [NEW FEATURE] VISUAL KEY FINGERPRINT
-// ============================================================================
-void print_key_fingerprint(const unsigned char* public_key) {
-    printf("\n🔐 Your Key Fingerprint:\n");
-    printf("╔════════════════════════════════════════╗\n");
-
-    const char* chars[] = { " ", "░", "▒", "▓", "█" };
-    for (int row = 0; row < 4; row++) {
-        printf("║  ");
-        for (int col = 0; col < 10; col++) {
-            int idx = (row * 10 + col) % crypto_box_PUBLICKEYBYTES;
-            int char_idx = (public_key[idx] % 5);
-            printf("%s", chars[char_idx]);
-        }
-        printf("  ║\n");
-    }
-    printf("╚════════════════════════════════════════╝\n");
-    printf("Compare this pattern with your friend to verify identity.\n");
-}
-
-// ============================================================================
-// [NEW FEATURE] DEAD MAN'S SWITCH
-// ============================================================================
-void check_dead_man_switch() {
-    const char* home = getenv("HOME");
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "%s/.securechat/last_login", home);
-
-    FILE* f = fopen(filepath, "r");
-    if (!f) return;
-
-    time_t last_login;
-    if (fscanf(f, "%ld", &last_login) != 1) {
-        fclose(f);
-        return;
-    }
-    fclose(f);
-
-    time_t now = time(NULL);
-    long max_idle = DEAD_MAN_DAYS * 24 * 60 * 60;
-
-    if (now - last_login > max_idle) {
-        printf("⚠️  DEAD MAN'S SWITCH: Inactivity detected (%ld days).\n", (now - last_login) / (24*3600));
-        printf("   Self-destructing keys to prevent compromise.\n");
-        panic_wipe();
-    }
-}
-
-void update_last_login() {
-    const char* home = getenv("HOME");
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "%s/.securechat/last_login", home);
-    FILE* f = fopen(filepath, "w");
-    if (f) {
-        fprintf(f, "%ld", time(NULL));
-        fclose(f);
-    }
-}
-
-// ============================================================================
-// [NEW FEATURE] UNIX PIPE INTEGRATION
-// ============================================================================
-void handle_pipe_mode(int argc, char* argv[]) {
-    int send_mode = 0;
-    char* target = NULL;
-
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--send") == 0) send_mode = 1;
-        if (strcmp(argv[i], "--to") == 0 && i + 1 < argc) target = argv[++i];
-    }
-
-    if (send_mode && target) {
-        char msg[MAX_MESSAGE];
-        if (fgets(msg, sizeof(msg), stdin)) {
-            trim_whitespace(msg);
-            if (strlen(msg) == 0) {
-                printf("[!] Empty message in pipe mode.\n");
-                _exit(1);
-            }
-
-            // NOTE: In a real pipe scenario, you'd need to load keys here.
-            // For this demo, we assume the user is already logged in or
-            // we skip the complex login flow for the pipe command.
-            // To make this fully functional, you would call login_user() logic here
-            // but it requires a password which isn't in a pipe.
-            // A common pattern is to store an encrypted session token for CLI tools.
-
-            printf("[*] Pipe mode: Message '%s' would be sent to %s\n", msg, target);
-            printf("[!] NOTE: Full pipe mode requires session token logic (not implemented in this basic version).\n");
-            printf("    Please use the interactive menu for now.\n");
-            _exit(1);
-        }
-    }
-}
-
-// ============================================================================
-// NETWORK & CURL HELPERS
+// NETWORK & CURL HELPERS (FIXED FOR HEAP CORRUPTION)
 // ============================================================================
 
 struct MemoryStruct {
     char* response;
     size_t size;
+    size_t capacity;
 };
 
 static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
     size_t realsize = size * nmemb;
     struct MemoryStruct* mem = (struct MemoryStruct*)userp;
-    char* ptr = realloc(mem->response, mem->size + realsize + 1);
-    if (!ptr) { free(mem->response); mem->response = NULL; return 0; }
-    mem->response = ptr;
+
+    // Ensure we have enough capacity
+    if (mem->size + realsize + 1 > mem->capacity) {
+        size_t new_capacity = mem->capacity + realsize + 1024;
+        char* ptr = realloc(mem->response, new_capacity);
+        if (!ptr) {
+            fprintf(stderr, "[!] ERROR: Not enough memory (realloc failed).\n");
+            free(mem->response);
+            mem->response = NULL;
+            mem->size = 0;
+            mem->capacity = 0;
+            return 0;
+        }
+        mem->response = ptr;
+        mem->capacity = new_capacity;
+    }
+
     memcpy(&(mem->response[mem->size]), contents, realsize);
     mem->size += realsize;
     mem->response[mem->size] = '\0';
@@ -437,7 +321,6 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 // ============================================================================
 // ENCRYPTION HELPERS
 // ============================================================================
-
 void encrypt_message(const char* content, const unsigned char* recipient_pub, char* out_hex) {
     unsigned char nonce[crypto_box_NONCEBYTES];
     size_t plaintext_len = strlen(content);
@@ -514,7 +397,6 @@ int decrypt_message(const char* hex, const unsigned char* sender_pub, char* out,
 // ============================================================================
 // FRIENDS & MESSAGES
 // ============================================================================
-
 void add_friend_to_local(const char* unique_id, const char* username, const unsigned char* public_key, int user_id) {
     if (friends_count >= MAX_FRIENDS) { printf("[!] Friend list full.\n"); return; }
 
@@ -540,8 +422,6 @@ void add_pending_request(const char* unique_id, const char* username, const unsi
 }
 
 int fetch_public_key_by_target(const char* target, char* pub_key_hex_out, char* username_out, int* user_id_out) {
-    // NOTE: Adjust URL if using Supabase REST directly
-    // Example: https://project.supabase.co/rest/v1/users?username=eq.target
     char url[1024];
     snprintf(url, sizeof(url), "%s/get-key/%s", BRIDGE_URL, target);
 
@@ -549,12 +429,13 @@ int fetch_public_key_by_target(const char* target, char* pub_key_hex_out, char* 
     if (!curl) return 0;
 
     struct MemoryStruct chunk;
-    chunk.response = malloc(1);
+    chunk.response = malloc(INITIAL_CURL_BUFFER_SIZE);
+    if (!chunk.response) { curl_easy_cleanup(curl); return 0; }
     chunk.size = 0;
+    chunk.capacity = INITIAL_CURL_BUFFER_SIZE;
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
-    // If using Supabase, you might need: headers = curl_slist_append(headers, "apikey: YOUR_ANON_KEY");
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -575,9 +456,13 @@ int fetch_public_key_by_target(const char* target, char* pub_key_hex_out, char* 
 
             if (cJSON_IsString(key_item) && cJSON_IsString(name_item) && cJSON_IsNumber(id_item)) {
                 size_t hex_len = strlen(key_item->valuestring);
+                unsigned char pub_key[crypto_box_PUBLICKEYBYTES];
                 if (hex_len != crypto_box_PUBLICKEYBYTES * 2) {
                     success = 0;
                 } else {
+                    for (size_t i = 0; i < crypto_box_PUBLICKEYBYTES; i++) {
+                        sscanf(key_item->valuestring + (i * 2), "%2hhx", &pub_key[i]);
+                    }
                     strncpy(pub_key_hex_out, key_item->valuestring, crypto_box_PUBLICKEYBYTES * 2);
                     pub_key_hex_out[crypto_box_PUBLICKEYBYTES * 2] = '\0';
                     strncpy(username_out, name_item->valuestring, MAX_USERNAME - 1);
@@ -608,8 +493,10 @@ int fetch_messages(int friend_user_id, cJSON** json_out) {
     if (!curl) return 0;
 
     struct MemoryStruct chunk;
-    chunk.response = malloc(1);
+    chunk.response = malloc(INITIAL_CURL_BUFFER_SIZE);
+    if (!chunk.response) { curl_easy_cleanup(curl); return 0; }
     chunk.size = 0;
+    chunk.capacity = INITIAL_CURL_BUFFER_SIZE;
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -719,8 +606,10 @@ int send_message(int recipient_user_id, const char* content) {
     if (!curl) { free(json_str); return 0; }
 
     struct MemoryStruct chunk;
-    chunk.response = malloc(1);
+    chunk.response = malloc(INITIAL_CURL_BUFFER_SIZE);
+    if (!chunk.response) { free(json_str); curl_easy_cleanup(curl); return 0; }
     chunk.size = 0;
+    chunk.capacity = INITIAL_CURL_BUFFER_SIZE;
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -785,8 +674,10 @@ int delete_account() {
         if (!curl) return 0;
 
         struct MemoryStruct chunk;
-        chunk.response = malloc(1);
+        chunk.response = malloc(INITIAL_CURL_BUFFER_SIZE);
+        if (!chunk.response) { curl_easy_cleanup(curl); return 0; }
         chunk.size = 0;
+        chunk.capacity = INITIAL_CURL_BUFFER_SIZE;
 
         curl_easy_setopt(curl, CURLOPT_URL, url);
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -832,8 +723,10 @@ int delete_chat_with_friend(int friend_index) {
         if (!curl) return 0;
 
         struct MemoryStruct chunk;
-        chunk.response = malloc(1);
+        chunk.response = malloc(INITIAL_CURL_BUFFER_SIZE);
+        if (!chunk.response) { curl_easy_cleanup(curl); return 0; }
         chunk.size = 0;
+        chunk.capacity = INITIAL_CURL_BUFFER_SIZE;
 
         curl_easy_setopt(curl, CURLOPT_URL, url);
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -902,8 +795,10 @@ void ip_geolocation() {
     if (!curl) return;
 
     struct MemoryStruct chunk;
-    chunk.response = malloc(1);
+    chunk.response = malloc(INITIAL_CURL_BUFFER_SIZE);
+    if (!chunk.response) { curl_easy_cleanup(curl); return; }
     chunk.size = 0;
+    chunk.capacity = INITIAL_CURL_BUFFER_SIZE;
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
@@ -1048,20 +943,13 @@ void persistent_chat(int friend_index) {
                         const char* sender_name = (sender_json->valueint == friend->user_id) ? friend->username : "Me";
 
                         if (decrypt_message(content_json->valuestring, friend->public_key, decrypted, sizeof(decrypted))) {
-                            // [NEW] TTL Check: Warn if message is older than 2 hours
-                            time_t msg_time = atol(ts_json->valuestring);
-                            time_t now = time(NULL);
-                            if (now - msg_time > MESSAGE_TTL_SECONDS) {
-                                printf("  [%s] %s: [EXPIRED] %s\n", ts_json->valuestring, sender_name, decrypted);
+                            if (strlen(decrypted) > 50) {
+                                char short_msg[53];
+                                strncpy(short_msg, decrypted, 50);
+                                short_msg[50] = '.'; short_msg[51] = '.'; short_msg[52] = '\0';
+                                printf("  [%s] %s: %s\n", ts_json->valuestring, sender_name, short_msg);
                             } else {
-                                if (strlen(decrypted) > 50) {
-                                    char short_msg[53];
-                                    strncpy(short_msg, decrypted, 50);
-                                    short_msg[50] = '.'; short_msg[51] = '.'; short_msg[52] = '\0';
-                                    printf("  [%s] %s: %s\n", ts_json->valuestring, sender_name, short_msg);
-                                } else {
-                                    printf("  [%s] %s: %s\n", ts_json->valuestring, sender_name, decrypted);
-                                }
+                                printf("  [%s] %s: %s\n", ts_json->valuestring, sender_name, decrypted);
                             }
                         }
                     }
@@ -1085,12 +973,6 @@ void persistent_chat(int friend_index) {
         if (strcmp(msg, "/exit") == 0 || strcmp(msg, "/quit") == 0) {
             chat_running = 0;
             break;
-        }
-
-        // [NEW] Verify Key Command
-        if (strcmp(msg, "/verify") == 0) {
-            print_key_fingerprint(my_public_key);
-            continue;
         }
 
         printf("[*] Encrypting and sending...\n");
@@ -1186,9 +1068,6 @@ int register_user() {
     printf("Your Unique ID: %s\n", unique_user_id);
     printf("============================================================\n");
 
-    // Show fingerprint
-    print_key_fingerprint(my_public_key);
-
     clear_input_buffer();
     printf("Press Enter to continue...");
     fflush(stdout);
@@ -1213,8 +1092,10 @@ int register_user() {
     if (!curl) { free(json_str); free_keys(); return 0; }
 
     struct MemoryStruct chunk;
-    chunk.response = malloc(1);
+    chunk.response = malloc(INITIAL_CURL_BUFFER_SIZE);
+    if (!chunk.response) { free(json_str); free_keys(); curl_easy_cleanup(curl); return 0; }
     chunk.size = 0;
+    chunk.capacity = INITIAL_CURL_BUFFER_SIZE;
 
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -1302,9 +1183,6 @@ int login_user() {
     if (fetch_public_key_by_target(u, pub_hex, username_out, &current_user_id)) {
         strncpy(current_username, username_out, MAX_USERNAME);
         printf("[+] Welcome back, %s!\n", current_username);
-
-        // [NEW] Update Last Login Time
-        update_last_login();
         return 1;
     } else {
         printf("[!] User not found on server.\n");
@@ -1329,8 +1207,7 @@ void settings_menu() {
         printf("3. Enable Bonus Tab\n");
         printf("4. Toggle Invisibility Mode\n");
         printf("5. Toggle Auto-Login\n");
-        printf("6. Verify Key Fingerprint (Visual)\n"); // [NEW]
-        printf("7. Back to Main Menu\n\n");
+        printf("6. Back to Main Menu\n\n");
         printf("Option: ");
         fflush(stdout);
 
@@ -1376,10 +1253,6 @@ void settings_menu() {
             pause_and_clear();
         }
         else if (strcmp(choice, "6") == 0) {
-            print_key_fingerprint(my_public_key);
-            pause_and_clear();
-        }
-        else if (strcmp(choice, "7") == 0) {
             running = 0;
         }
         else {
@@ -1566,12 +1439,7 @@ void main_menu_loop() {
 // MAIN ENTRY POINT
 // ============================================================================
 
-int main(int argc, char* argv[]) {
-    // [NEW] Check for pipe mode first
-    if (argc > 1) {
-        handle_pipe_mode(argc, argv);
-    }
-
+int main() {
     printf("\033[?25h");
     fflush(stdout);
 
@@ -1589,10 +1457,7 @@ int main(int argc, char* argv[]) {
 
     ensure_app_dir();
 
-    // [NEW] Set up Panic Signal Handler (Ctrl+\)
-    signal(SIGQUIT, handle_panic);
-
-    // Check for auto-login file
+    // Check for auto-login file (Security Note: Auto-login is disabled for safety)
     const char* home = getenv("HOME");
     char filepath[256];
     snprintf(filepath, sizeof(filepath), "%s/.securechat/auto_login", home);
@@ -1602,8 +1467,7 @@ int main(int argc, char* argv[]) {
         fscanf(auto_login_file, "%d", &enabled);
         fclose(auto_login_file);
         if (enabled) {
-            printf("Auto-login detected... ");
-            printf(" (Disabled for security - you must login manually).\n");
+            printf("Auto-login detected... (Disabled for security - you must login manually).\n");
         }
     }
 
@@ -1633,9 +1497,6 @@ int main(int argc, char* argv[]) {
                     pause_and_clear();
                 }
             } else if (strcmp(choice, "2") == 0) {
-                // [NEW] Check Dead Man's Switch before login
-                check_dead_man_switch();
-
                 if (login_user()) {
                     main_menu_loop();
                 } else {
